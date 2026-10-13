@@ -4,7 +4,7 @@
 原作者：alexeisergienko https://github.com/alexeisergienko/homm3-messages
 由QQ：127644712​​​​ 高保洪修改成TWINBASIC代码（兼容VB6）
 在TB V1005版本测试通过。
-< img宽度= “916” 高度= “715”  alt = “59b00a87-ff7e-435e-a37b-b6534b3125dd”  src = “https://github.com/user-attachments/assets/ab412846-2c3e-4e00-9e66-acb6ffdf0d9d”  />
+< img width= “916” height= “715”  alt = “59b00a87-ff7e-435e-a37b-b6534b3125dd”  src = “https://github.com/user-attachments/assets/ab412846-2c3e-4e00-9e66-acb6ffdf0d9d”  />
 
 
 
