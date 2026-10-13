@@ -1,0 +1,277 @@
+Module Mod_通用全局子程序
+
+    ' =====================================================================
+    ' 图片加载总策略：① 资源  →  ② 磁盘（逐级向上找）  →  ③ 用户手动指定的目录
+    ' ---------------------------------------------------------------------
+    ' 说明：渲染内核 modHomm3 / modHomm2 是用 GDI+ 从【文件路径】读取 PNG 的
+    '       （见 modHomm3.bas 里的 EnsureSprite / GdiPlus_LoadPng），
+    '       所以“优先从资源读”的实现办法是：
+    '       把资源里的 PNG 字节解包到缓存目录，再把缓存文件的路径交给渲染内核。
+    '       这样渲染内核一行都不用改，速度也和读磁盘一样快（只解包一次）。
+    ' =====================================================================
+    Public g_ImgCacheDir As String   ' 资源解包后的缓存目录（自动创建）
+    Public g_UserImgDir  As String   ' 用户在程序里手动指定的图片目录
+
+    ' ------------------------------------------------------------------
+    ' 资源解包缓存目录：优先 App.Path\img，只读时退回系统临时目录
+    ' ------------------------------------------------------------------
+    Public Function ImgCacheDir() As String
+        If Len(g_ImgCacheDir) > 0 Then
+            ImgCacheDir = g_ImgCacheDir
+            Exit Function
+        End If
+
+        Dim p As String
+        On Error Resume Next
+        p = App.Path & "\img"
+        If Len(Dir$(p, vbDirectory)) = 0 Then MkDir p
+        If Len(Dir$(p, vbDirectory)) = 0 Then p = ""
+        If Len(p) = 0 Then p = Environ$("TEMP")
+        If Len(p) = 0 Then p = App.Path
+        Err.Clear
+        On Error GoTo 0
+
+        g_ImgCacheDir = p
+        ImgCacheDir = p
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' 从资源里取字节；取到返回 True
+    ' ------------------------------------------------------------------
+    Public Function GetResBytes(ByVal FileName As String, ByVal ResType As String, _
+                                ByRef outBytes() As Byte) As Boolean
+        On Error Resume Next
+        Err.Clear
+        outBytes = LoadResData(FileName, ResType)
+        GetResBytes = (Err.Number = 0)
+        If Err.Number <> 0 Then Err.Clear
+        On Error GoTo 0
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' 把字节写成文件（已存在且大小一致则跳过）
+    ' ------------------------------------------------------------------
+    Private Function SaveBytesToFile(ByRef b() As Byte, ByVal FilePath As String) As Boolean
+        On Error Resume Next
+        Dim n As Long
+        n = UBound(b) - LBound(b) + 1
+
+        If Len(Dir$(FilePath)) > 0 Then
+            If FileLen(FilePath) = n Then
+                SaveBytesToFile = True      ' 已解包过，直接复用
+                Exit Function
+            End If
+            Kill FilePath
+        End If
+
+        Dim fn As Integer
+        fn = FreeFile
+        Open FilePath For Binary As #fn
+        If Err.Number = 0 Then
+            Put #fn,, b
+            Close #fn
+            SaveBytesToFile = (Err.Number = 0)
+        End If
+        If Err.Number <> 0 Then Err.Clear
+        On Error GoTo 0
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' FindSprite：拿着文件名，从 exe 所在目录开始逐级向上最多找 5 层，
+    ' 每层先看 img\ 子目录、再看本目录；谁先存在就返回谁的【完整路径】，都没有返回 ""
+    ' ------------------------------------------------------------------
+    Public Function FindSprite(ByVal FileName As String) As String
+        Dim base As String, p As String, i As Long, j As Long, k As Long
+        base = App.Path' exe 所在目录，比如 D:\Game\bin\Debug
+        For i = 0 To 4' 从当前目录开始，逐级往上回退，最多回退 4 级
+            p = base
+            For j = 1 To i' 回退 i 级：bin\Debug → bin → D:\Game → ...
+                If Len(p) <= 3 Then Exit For
+                k = InStrRev(p, "\")
+                If k <= 0 Then Exit For
+                p = Left$(p, k - 1)
+            Next j
+            ' 先试 p\img\FileName，再试 p\FileName
+            If Len(Dir$(p & "\img\" & FileName)) > 0 Then
+                FindSprite = p & "\img\" & FileName
+                Exit Function
+            End If
+            If Len(Dir$(p & "\" & FileName)) > 0 Then
+                FindSprite = p & "\" & FileName
+                Exit Function
+            End If
+        Next i
+        FindSprite = ""
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' FindSpriteRes：① 资源 → ② 磁盘 → ③ 用户目录
+    ' 返回：可用的图片【完整路径】；全都找不到返回 ""
+    ' （渲染内核要的是路径，所以这里返回路径而不是 Picture 对象；
+    '   想要 Picture 对象请用下面的 LoadPictureAuto）
+    ' ------------------------------------------------------------------
+    Public Function FindSpriteRes(ByVal FileName As String, _
+                                  Optional ByVal ResType As String = "img", _
+                                  Optional ByVal FallbackToDisk As Boolean = True) As String
+        Dim b() As Byte
+        Dim p As String
+
+        ' ① 资源优先：命中就解包到缓存目录，返回缓存文件的路径
+        If GetResBytes(FileName, ResType, b) Then
+            p = ImgCacheDir() & "\" & FileName
+            If SaveBytesToFile(b, p) Then
+                If Len(Dir$(p)) > 0 Then
+                    FindSpriteRes = p
+                    Exit Function
+                End If
+            End If
+        End If
+
+        ' ② 回退到磁盘：沿用 FindSprite 的逐级向上查找
+        If FallbackToDisk Then
+            p = FindSprite(FileName)
+            If Len(p) > 0 Then
+                FindSpriteRes = p
+                Exit Function
+            End If
+        End If
+
+        ' ③ 用户在程序里手动指定的目录
+        p = FindInUserDir(FileName)
+        If Len(p) > 0 Then
+            FindSpriteRes = p
+            Exit Function
+        End If
+
+        FindSpriteRes = ""
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' 在用户手动指定的目录里找图片（目录本身，或目录下的 img 子目录）
+    ' ------------------------------------------------------------------
+    Public Function FindInUserDir(ByVal FileName As String) As String
+        Dim p As String
+        If Len(g_UserImgDir) = 0 Then Exit Function
+        p = g_UserImgDir
+        If Right$(p, 1) <> "\" Then p = p & "\"
+        If Len(Dir$(p & FileName)) > 0 Then
+            FindInUserDir = p & FileName
+            Exit Function
+        End If
+        If Len(Dir$(p & "img\" & FileName)) > 0 Then
+            FindInUserDir = p & "img\" & FileName
+            Exit Function
+        End If
+        FindInUserDir = ""
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' LoadPictureAuto：同样是 ① 资源 → ② 磁盘 → ③ 用户目录，
+    ' 但直接返回 Picture 对象（用于 picPreview 背景图等只需要显示的地方）
+    ' 找不到返回 Nothing，不报错
+    ' ------------------------------------------------------------------
+    Public Function LoadPictureAuto(ByVal FileName As String, _
+                                    Optional ByVal ResType As String = "img") As StdPicture
+        Dim b() As Byte
+        Dim p As String
+        On Error Resume Next
+
+        ' ① 资源
+        If GetResBytes(FileName, ResType, b) Then
+            Set LoadPictureAuto = Global.LoadPicture(b)
+            If Err.Number = 0 And Not LoadPictureAuto Is Nothing Then Exit Function
+            Err.Clear
+            Set LoadPictureAuto = Nothing
+        End If
+
+        ' ② 磁盘
+        p = FindSprite(FileName)
+        If Len(p) = 0 Then p = FindInUserDir(FileName)
+        If Len(p) > 0 Then
+            Set LoadPictureAuto = Global.LoadPicture(p)
+            If Err.Number <> 0 Then
+                Err.Clear
+                Set LoadPictureAuto = Nothing
+            End If
+        End If
+        On Error GoTo 0
+    End Function
+
+    ' ------------------------------------------------------------------
+    ' 把用户输入的路径规整成一个目录：可以输目录，也可以输某个图片文件的完整路径
+    ' 不存在返回 ""
+    ' ------------------------------------------------------------------
+    Public Function PickImgDir(ByVal s As String) As String
+        Dim isDir As Boolean
+        s = Trim$(s)
+        If Len(s) = 0 Then Exit Function
+
+        Do While Len(s) > 3 And Right$(s, 1) = "\"
+            s = Left$(s, Len(s) - 1)
+        Loop
+
+        On Error Resume Next
+        isDir = ((GetAttr(s) And vbDirectory) = vbDirectory)
+        If Err.Number <> 0 Then isDir = False
+        Err.Clear
+        On Error GoTo 0
+
+        If isDir Then
+            ' 如果目录下还有 img 子目录，优先用 img
+            If Len(Dir$(s & "\img", vbDirectory)) > 0 Then
+                PickImgDir = s & "\img"
+            Else
+                PickImgDir = s
+            End If
+            Exit Function
+        End If
+
+        If Len(Dir$(s)) > 0 Then
+            Dim k As Long
+            k = InStrRev(s, "\")
+            If k > 0 Then PickImgDir = Left$(s, k - 1)
+            Exit Function
+        End If
+
+        PickImgDir = ""
+    End Function
+
+    ' 从资源加载图片的函数       
+    Public Function LoadPictureFromResource(resourcePicName As String, resourceName As String) As Picture' 从资源加载图片的函数
+        On Error GoTo QQ127644712 '纠错             
+            On Error Resume Next
+                '调用格式：Global.LoadPicture(LoadResData(图片文件名, 所在的资源文件夹名))             
+                Set LoadPictureFromResource = Global.LoadPicture(LoadResData(resourcePicName, resourceName))
+                If Err.Number <> 0 Then
+                    ' 如果资源加载失败，使用默认图片或空图片
+                    Set LoadPictureFromResource = Nothing
+                End If
+                Exit Function  '没有错误，正常退出
+        QQ127644712: '错误跳转到此并记录错误信息到文件        
+            错误处理 Now & " LoadPictureFromResource()", "Mod_通用子程序集合.twin", Err.Number, Err.Description, Erl & vbCritical
+            Err.Clear
+    End Function
+    
+    '****************************************************************************************
+    ' 打印消息子程序 LogToMain
+    '****************************************************************************************
+    Public 已经打印的消息数量统计 As Long = 0
+    Public Sub LogToMain(ByVal text As String, Optional ByVal color As Long = vbBlue)
+        On Error GoTo QQ127644712 '纠错
+            With frmMain.Txt_log
+                .ForeColor = color
+                .SelText = "[" & Format(Time, "HH:MM:SS") & "] " & text & vbCrLf
+                .SelStart = Len( .Text) ' 滚动到底部  
+            End With
+            已经打印的消息数量统计 = 已经打印的消息数量统计 + 1
+            If 已经打印的消息数量统计 > 200 Then 已经打印的消息数量统计 = 0:frmMain.Txt_log = ""
+             
+            Exit Sub '没有错误，正常退出
+        QQ127644712: '错误跳转到此并记录错误信息到文件        
+            错误处理 Now & " LogToMain()", "Mod_通用全局子程序", Err.Number, Err.Description, Erl & vbCritical
+            Err.Clear
+    End Sub
+    
+    
+
+End Module

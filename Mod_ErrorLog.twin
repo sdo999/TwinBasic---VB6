@@ -1,0 +1,142 @@
+Module Mod_ErrorLog
+
+    '===============================================================================
+    ' Mod_ErrorLog.twin - 错误日志（UTF-8 写入，不再乱码）
+    '===============================================================================
+    '****************************************************************************************
+    '*本段代码作用： 错误处理'2025/09/07添加                                      *
+    '****************************************************************************************
+    '*                                                                                      *
+    '* 创建者:     高保洪（CSDN：gosub60）                                                    *
+    '* 联系方式:   QQ127644712 Q群:776491265                                                 *
+    '* 最后修改:   2026/08/14修改                                                            *
+    '*                                                           *
+    '****************************************************************************************
+    '* 使用方法：                                                                           *
+    '* 错误处理 " 读取原始地图数据", "Form_地图编辑器", Err.Number, Err.Description, Erl & vbCritical                                         *
+    '* 'On Error GoTo ErrHandler + Erl 行号（需在每行前加行号才能精确定位）                                 *
+    '*                                 *
+    '*                                                                                      *
+    '****************************************************************************************
+    '* 新增：                                                                      *
+    '*  2026/08/14:  UTF-8 写入，不再乱码                                                                                  *
+    '*  2026/08/14:  统一路径 + 清除日志                                                           *
+    '*  -                        *
+    '*                                                                                      *
+    '*  -          *
+    '*                                                                    *
+    '****************************************************************************************
+    Option Explicit
+    ' DefObj A-Z
+
+    Public Sub 错误处理(ByVal procName As String, ByVal contName As String, _
+                        ByVal erNumber As Long, ByVal erDesc As String, ByVal errLine As Long)
+        On Error GoTo QQ127644712
+    
+        Dim 文件名 As String
+        '文件名 = App.Path & "\errors.txt"
+        文件名 = GetErrorLogPath()   ' ✅ 统一用这个函数，不再硬编码
+        ' 确保目录存在
+        Dim folderPath As String
+        folderPath = Left$(文件名, InStrRev(文件名, "\") - 1)
+        If Dir(folderPath, vbDirectory) = "" Then MkDir folderPath
+    
+        ' 构建日志内容（用 vbCrLf 换行，方便阅读）
+        Dim content As String
+        content = "以下错误发生在：" & procName & "，所在模块名是：" & contName & vbCrLf & _
+                  "运行时错误编号：" & erNumber & "，错误信息：" & erDesc & vbCrLf & _
+                  "发生错误行号：" & errLine & vbCrLf & _
+                  "时间：" & Now & vbCrLf & _
+                  "─────────────────────────────────" & vbCrLf
+    
+        ' 用 ADODB.Stream 以 UTF-8 追加写入（不会乱码）
+        Call AppendUtf8Text(文件名, content)
+    
+        ' 同时输出到调试窗口
+        Debug.Print "❌ 错误: " & erDesc & " (在 " & procName & ")"
+        Exit Sub
+    
+    QQ127644712:
+        ' 连错误处理都失败了，只能 Print 到立即窗口
+        Debug.Print "❌❌ 写入错误日志本身也失败了: " & Err.Description
+        Err.Clear
+    End Sub
+
+    ' UTF-8 追加写入（核心：先读原内容，拼接新内容，整体重写）
+    Private Sub AppendUtf8Text(path As String, content As String)
+        On Error GoTo QQ127644712
+    
+        Dim stream As Object
+        Set stream = CreateObject("ADODB.Stream")
+        stream.Type = 2 ' adTypeText
+        stream.Charset = "UTF-8"
+        stream.Open
+    
+        ' 如果文件已存在，先读取原内容
+        If Dir(path) <> "" Then
+            Dim oldContent As String
+            Dim readStream As Object
+            Set readStream = CreateObject("ADODB.Stream")
+            readStream.Type = 2
+            readStream.Charset = "UTF-8"
+            readStream.Open
+            readStream.LoadFromFile path
+            oldContent = readStream.ReadText
+            readStream.Close
+            Set readStream = Nothing
+            ' 写回原内容 + 新内容
+            stream.WriteText oldContent & content
+        Else
+            ' 新文件，直接写
+            stream.WriteText content
+        End If
+    
+        stream.SaveToFile path, 2 ' adSaveCreateOverWrite
+        stream.Close
+        Set stream = Nothing
+        Exit Sub
+    
+    QQ127644712:
+        Err.Clear
+    End Sub
+    
+    '==============================
+    ' 统一错误日志文件路径（唯一权威来源！）
+    ' 所有模块都调用这个函数获取路径，不再各自拼字符串
+    '==============================
+    Public Function GetErrorLogPath() As String
+        GetErrorLogPath = App.Path & "\errors.txt"  ' ← 统一用 errors.txt（带s）
+    End Function
+
+    '==============================
+    ' 清除错误日志（供 Form_Load 调用）
+    '==============================
+    Public Sub ClearErrorLog()
+        On Error GoTo QQ127644712
+    
+        Dim logPath As String
+        logPath = GetErrorLogPath()
+    
+        ' 检查文件是否存在
+        If Dir(logPath) <> "" Then
+            ' ✅ 文件存在 → 直接删除（最快方法）
+            Kill logPath
+            LogToMain "🗑️ 已清除历史错误日志：" & logPath
+        Else
+            ' 文件不存在 → 已经干净了，什么都不用做
+            ' （如果一定要新建空文件，取消下面注释）
+            ' Call Mod_FileUtil.SaveUtf8Text(logPath, "")
+            ' LogToMain "📄 错误日志不存在，已新建空文件"
+        End If
+    
+        Exit Sub
+    
+    QQ127644712:
+        LogToMain "⚠️ 清除错误日志失败：" & Err.Description
+        Err.Clear
+    End Sub
+    
+    
+    
+
+End Module

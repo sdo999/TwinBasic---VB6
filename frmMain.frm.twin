@@ -1,0 +1,640 @@
+[FormDesignerId("EACC08E0-5627-4962-8494-22CFF4864120")]
+[ClassId("40B4E962-1077-4CA7-94C5-066D86CC8A3B")]
+[InterfaceId("564261E8-080A-419C-8555-2D7330E47D8E")]
+[EventInterfaceId("F08DA2BA-5FCB-4190-A02E-1C604F196848")]
+Class frmMain
+    Attribute VB_Name = "frmMain"
+    Attribute VB_Creatable = False
+    Attribute VB_PredeclaredId = True
+    Attribute VB_Exposed = False
+    Option Explicit
+    
+    ' =====================================================================
+    ' 主窗体 -- 《魔法门之英雄无敌》风格的消息生成器 By 高保洪 qq127644712
+    ' 原作者：alexeisergienko  https://github.com/alexeisergienko/homm3-messages
+    ' 在线生成HoMM风格的消息:https://alexeisergienko.github.io/homm3-messages/
+    '
+    ' 所有内容均通过GDI+由modHomm2/modHomm3绘制；此表单
+    ' '只是他们周围的外壳。'。
+    ' =====================================================================
+    
+    Private Declare PtrSafe Function CreateCompatibleDC Lib "gdi32" ( _
+        ByVal hdc As LongPtr) As LongPtr
+    Private Declare PtrSafe Function DeleteDC Lib "gdi32" ( _
+        ByVal hdc As LongPtr) As Long
+    Private Declare PtrSafe Function SelectObject Lib "gdi32" ( _
+        ByVal hdc As LongPtr, ByVal hObject As LongPtr) As LongPtr
+    Private Declare PtrSafe Function DeleteObject Lib "gdi32" ( _
+        ByVal hObject As LongPtr) As Long
+    Private Declare PtrSafe Function StretchBlt Lib "gdi32" ( _
+        ByVal hdc As LongPtr, ByVal x As Long, ByVal y As Long, _
+        ByVal nWidth As Long, ByVal nHeight As Long, _
+        ByVal hSrcDC As LongPtr, ByVal xSrc As Long, ByVal ySrc As Long, _
+        ByVal nSrcWidth As Long, ByVal nSrcHeight As Long, ByVal dwRop As Long) As Long
+    Private Declare PtrSafe Function SetStretchBltMode Lib "gdi32" ( _
+        ByVal hdc As LongPtr, ByVal nStretchMode As Long) As Long
+    ' 带透明通道的贴图：让消息图“透”在背景图上面
+    Private Declare PtrSafe Function AlphaBlend Lib "msimg32.dll" ( _
+        ByVal hdcDest As LongPtr, ByVal xoriginDest As Long, ByVal yoriginDest As Long, _
+        ByVal wDest As Long, ByVal hDest As Long, _
+        ByVal hdcSrc As LongPtr, ByVal xoriginSrc As Long, ByVal yoriginSrc As Long, _
+        ByVal wSrc As Long, ByVal hSrc As Long, ByVal BlendFunc As Long) As Long
+    
+    Private Const SRCCOPY As Long = &HCC0020
+    Private Const STRETCH_DELETESCANS As Long = 3
+    ' BLENDFUNCTION：AlphaFormat(AC_SRC_ALPHA)<<24 | SourceConstantAlpha(255)<<16 | BlendFlags<<8 | BlendOp(AC_SRC_OVER)
+    Private Const AC_BLENDFUNC As Long = &H1FF0000
+    ' 是否用透明合成（True：消息图透明处能看到背景图；False：退回原来的不透明贴图）
+    Private Const USE_ALPHA_BLEND As Boolean = True
+    
+    ' PaintPicture 的第 11 个参数 StretchQuality（高质量插值/半色调）。
+    ' 部分 twinBASIC 版本没有导出 vbQualityHigh 这个枚举成员，编译会报“未定义”，
+    ' 所以这里自己定义成数字：0=普通质量 vbQualityNormal，1=高质量 vbQualityHigh。
+    ' StretchFill 里还做了运行时兜底：万一这个版本不认这个参数，会自动退回普通贴图。
+    Private Const STRETCH_QUALITY_NORMAL As Long = 0
+    Private Const STRETCH_QUALITY_HIGH   As Long = 1
+    
+    Private Const STYLE_HOMM3 As Long = 0
+    Private Const STYLE_HOMM2 As Long = 1
+    
+    ' picPreview 的背景图文件名（按风格切换）
+    Private Const VOID_BG_H3   As String = "homm3-void.png"
+    Private Const VOID_BG_H2   As String = "homm2-void.png"
+    ' 左侧面板 picPanel 的背景图文件名；找不到就保持无背景，不影响使用
+    Private Const PANEL_BG_H3  As String = "homm3-panel.png"
+    Private Const PANEL_BG_H2  As String = "homm2-panel.png"
+    
+    Private m_style       As Long
+    ' 注意：渲染内核（modHomm3 / modHomm2 里的 Homm3_Render / Homm2_Render）
+    ' 是用 GDI+ 按【文件路径】读 PNG 的，所以精灵图必须保存为“路径字符串”。
+    ' 资源优先的实现方式：命中资源时把 PNG 解包到缓存目录，再把缓存路径交给它。
+    Private m_sprite3     As String
+    Private m_sprite2     As String
+    Private m_void3       As StdPicture ' picPreview 背景图（HoMM3）
+    Private m_void2       As StdPicture ' picPreview 背景图（HoMM2）
+    Private m_panelBg     As StdPicture ' picPanel 背景图（可选，找不到就 Nothing）
+    Private m_bmp         As LongPtr
+    Private m_hBmp        As LongPtr
+    Private m_outW        As Long
+    Private m_outH        As Long
+    Private m_loading     As Boolean
+    Private m_shutdown    As Boolean  ' 正在关闭：关掉所有重绘，避免退出时又去画一遍
+    Private m_cleanedUp   As Boolean  ' 收尾只做一次（Unload / Terminate 都会调）
+    
+    ' ------------------------------------------------------------------
+    Private Sub Form_Load()
+        Dim i As Long
+    
+        m_loading = True
+    
+        For i = 0 To HOMM3_COLOR_COUNT - 1
+            cboColor.AddItem Homm3_ColorName(i)
+        Next i
+        cboColor.ListIndex = 0
+    
+        cboZoom.AddItem "1x"
+        cboZoom.AddItem "2x"
+        cboZoom.AddItem "3x"
+        cboZoom.AddItem "4x"
+        cboZoom.AddItem "6x"
+        cboZoom.AddItem "8x"
+        cboZoom.ListIndex = 0
+    
+        chkOK.Value = 1
+        chkCancel.Value = 0
+        chkShadow.Value = 0
+        chkScroll.Value = 0
+        chkOutline.Value = 1
+    
+        optAuto.Value = True
+        optManual.Value = False
+        optHomm3.Value = False' True
+        optHomm2.Value = True'False
+        optGood.Value = True
+        optEvil.Value = False
+    
+        txtText.Text = "《魔法门之英雄无敌》风格的消息生成器" & vbCrLf & _
+                       "By 高保洪 qq127644712" & vbCrLf & "原作者：alexeisergienko "
+        txtWidth.Text = "555"
+        txtHeight.Text = "555"
+        txtFont.Text = "宋体"'"SimSun"
+        txtFontSize.Text = "12"
+        txtFontY.Text = "0"
+    
+        picPreview.ScaleMode = vbPixels
+        picPreview.AutoRedraw = True     ' 背景图 + 消息图都画进持久位图，窗口被遮挡后能自动重画
+        picPanel.ScaleMode = vbPixels
+        
+        m_style = STYLE_HOMM2' STYLE_HOMM3
+        
+        ' 一次性把所有图片找一遍：优先资源，其次磁盘，最后用户目录
+        LoadAllImages False
+        PaintPanelBg
+        m_loading = False
+        SyncStyleControls
+        DoRender
+    End Sub
+     
+    ' ==================================================================
+    ' 关闭程序时的清理（原先点 X 会报错/卡住的根因就在这）
+    ' ------------------------------------------------------------------
+    ' 原因：Homm3_Cleanup 里最后调了 GdiPlus_Shutdown（把全局 GDI+ 关掉），
+    '       紧接着 Homm2_Cleanup 又去 GdipDisposeImage 释放 HoMM2 的精灵图——
+    '       这是“GDI+ 已卸载后再调用 GDI+”，属于未定义行为，必崩/卡。
+    '       另外 End 语句会跳过正常的销毁流程，反而更容易卡。
+    ' 正确顺序：先释放所有 GDI+ 对象 → 再统一关闭 GDI+ → 让程序自然退出。
+    ' ==================================================================
+    Private Sub Form_QueryUnload(Cancel As Integer, UnloadMode As Integer)
+        m_shutdown = True       ' 先拉闸：退出过程中不再触发任何重绘
+    End Sub
+    
+    Private Sub Form_Unload(Cancel As Integer)
+        m_shutdown = True
+        ShutdownAll
+        ' 不要再写 End：清理做完让程序自然退出才是干净的
+    End Sub
+    
+    ' 窗体的 Terminate 兜底：万一 Unload 没走到（比如 End 跳过了），这里再收一次尾
+    Private Sub Form_Terminate()
+        ShutdownAll
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 收尾：谁先谁后有讲究，且整个过程不允许任何错误弹窗挡住退出
+    ' ------------------------------------------------------------------
+    Private Sub ShutdownAll()
+        If m_cleanedUp Then Exit Sub
+        m_cleanedUp = True
+        m_shutdown = True
+    
+        On Error Resume Next        ' 清理阶段一律吞掉错误，绝不让报错框挡住关闭
+    
+        ' ① 自己持有的 GDI 位图
+        If m_bmp <> 0 Then GdipDisposeImage m_bmp
+        m_bmp = 0
+        If m_hBmp <> 0 Then DeleteObject m_hBmp
+        m_hBmp = 0
+    
+        ' ② 各模块里缓存的 GDI+ 对象（必须在 ③ 之前全部释放！）
+        Homm3_Cleanup               ' 已改成不再自己关 GDI+
+        Homm2_Cleanup
+        CJK_Reset                   ' 字体/画刷等 GDI+ 对象，以前一直没释放
+    
+        ' ③ 最后统一关闭 GDI+
+        GdiPlus_Shutdown
+    
+        ' ④ 释放图片对象
+        Set m_void3 = Nothing
+        Set m_void2 = Nothing
+        Set m_panelBg = Nothing
+    
+        Err.Clear
+        On Error GoTo 0
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    Private Sub SyncStyleControls()
+        Dim isH3 As Boolean
+        isH3 = (m_style = STYLE_HOMM3)
+    
+        cboColor.Enabled = isH3
+        lblColor.Enabled = isH3
+        chkScroll.Enabled = isH3
+        optGood.Enabled = Not isH3
+        optEvil.Enabled = Not isH3
+        lblTheme.Enabled = Not isH3
+        txtWidth.Enabled = isH3
+        lblW.Enabled = isH3
+    
+        If isH3 Then
+            fraSize.Caption = "尺寸（HoMM3：任意宽度x高度）"
+        Else
+            fraSize.Caption = "尺寸（HoMM2：仅限高度）"
+        End If
+    End Sub
+    
+    Private Function GetZoom() As Long
+        Select Case cboZoom.ListIndex
+            Case 0: GetZoom = 1
+            Case 1: GetZoom = 2
+            Case 2: GetZoom = 3
+            Case 3: GetZoom = 4
+            Case 4: GetZoom = 6
+            Case 5: GetZoom = 8
+            Case Else: GetZoom = 1
+        End Select
+    End Function
+    
+    Private Sub ApplyFontSettings()
+        gCJK_FontName = Trim$(txtFont.Text)
+        If Len(gCJK_FontName) = 0 Then gCJK_FontName = "SimSun"
+        Dim sz As Long
+        sz = CLng(Val(txtFontSize.Text))
+        If sz < 6 Then sz = 6
+        If sz > 96 Then sz = 96
+        If sz <> gCJK_FontSize Then CJK_Reset
+        gCJK_FontSize = sz
+        gCJK_ExtraY = CLng(Val(txtFontY.Text))
+        gCJK_UseOutline = (chkOutline.Value = 1)
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    Private Sub DoRender()
+        If m_loading Then Exit Sub
+    
+        ApplyFontSettings
+    
+        Dim zoom As Long
+        zoom = GetZoom()
+    
+        If m_bmp <> 0 Then GdipDisposeImage m_bmp
+        m_bmp = 0
+        If m_hBmp <> 0 Then DeleteObject m_hBmp
+        m_hBmp = 0
+    
+        If m_style = STYLE_HOMM3 Then
+            If Len(m_sprite3) = 0 Or Len(Dir$(m_sprite3)) = 0 Then
+                lblInfo.Caption = "未找到 homm3-sprite.png，单击[打开图片.......]指定图片目录"
+                ShowBackgroundOnly
+                Exit Sub
+            End If
+    
+            Dim o3 As HOMM3_OPTIONS
+            Dim r3 As HOMM3_RESULT
+            With o3
+                .Text = txtText.Text
+                .ColorIndex = cboColor.ListIndex
+                .ShowOK = (chkOK.Value = 1)
+                .ShowCancel = (chkCancel.Value = 1)
+                .DrawShadow = (chkShadow.Value = 1)
+                .ManualSize = (optManual.Value = True)
+                .ManualWidth = CLng(Val(txtWidth.Text))'图片宽度
+                .ManualHeight = CLng(Val(txtHeight.Text))'图片高度
+                .ForceScroll = (chkScroll.Value = 1)
+                .Zoom = zoom
+            End With
+    
+            m_bmp = Homm3_Render(m_sprite3, o3, r3)
+            If m_bmp = 0 Then
+                lblInfo.Caption = "渲染失败！"
+                Exit Sub
+            End If
+    
+            m_outW = r3.OutWidth
+            m_outH = r3.OutHeight
+    
+            If Not o3.ManualSize Then
+                m_loading = True
+                txtWidth.Text = CStr(r3.PopupWidth)
+                txtHeight.Text = CStr(r3.PopupHeight)
+                m_loading = False
+            End If
+            '信息提示栏
+            lblInfo.Caption = "HoMM3 弹出窗口:" & CStr(r3.PopupWidth) & " x " & CStr(r3.PopupHeight) & _
+                              "   PNG " & CStr(m_outW) & " x " & CStr(m_outH) & _
+                              "   lines " & CStr(r3.LineCount) & _
+                              IIf(r3.Clipped, "  [clipped]", "")
+        Else
+            If Len(m_sprite2) = 0 Or Len(Dir$(m_sprite2)) = 0 Then
+                lblInfo.Caption = "找不到 homm2-sprite.png，单击[打开图片.......]指定图片目录"
+                ShowBackgroundOnly
+                Exit Sub
+            End If
+    
+            Dim o2 As HOMM2_OPTIONS
+            Dim r2 As HOMM2_RESULT
+            With o2
+                .Text = txtText.Text
+                .Theme = IIf(optEvil.Value = True, HOMM2_THEME_EVIL, HOMM2_THEME_GOOD)
+                .ShowOK = (chkOK.Value = 1)
+                .ShowCancel = (chkCancel.Value = 1)
+                .DrawShadow = (chkShadow.Value = 1)
+                .ManualHeight = (optManual.Value = True)
+                .ForcedHeight = CLng(Val(txtHeight.Text))
+                .Zoom = zoom
+            End With
+    
+            m_bmp = Homm2_Render(m_sprite2, o2, r2)
+            If m_bmp = 0 Then
+                lblInfo.Caption = "渲染失败！"
+                Exit Sub
+            End If
+    
+            m_outW = r2.OutWidth
+            m_outH = r2.OutHeight
+    
+            If Not o2.ManualHeight Then
+                m_loading = True
+                txtHeight.Text = CStr(r2.PopupHeight)
+                m_loading = False
+            End If
+    
+            lblInfo.Caption = "HoMM2 " & IIf(optEvil.Value = True, "evil ", "good ") & _
+                              "  弹出窗口: " & CStr(r2.PopupWidth) & " x " & CStr(r2.PopupHeight) & _
+                              "   PNG " & CStr(m_outW) & " x " & CStr(m_outH) & _
+                              "   lines " & CStr(r2.LineCount) & _
+                              IIf(r2.Clipped, "  [clipped]", "")
+        End If
+    
+        ' 生成 HBITMAP：透明合成时底色传 0（保留透明通道），否则传 -1（白底，同以前）
+        If USE_ALPHA_BLEND Then
+            If GdipCreateHBITMAPFromBitmap(m_bmp, m_hBmp, 0) <> GpOk Then m_hBmp = 0
+        Else
+            If GdipCreateHBITMAPFromBitmap(m_bmp, m_hBmp, -1) <> GpOk Then m_hBmp = 0
+        End If
+        ShowPreview
+    End Sub
+    
+    Private Sub ShowPreview()
+        If m_hBmp = 0 Then
+            ShowBackgroundOnly
+            Exit Sub
+        End If
+        Dim pw As Long, ph As Long, dw As Long, dh As Long, sc As Double
+        pw = picPreview.ScaleWidth
+        ph = picPreview.ScaleHeight
+        If pw <= 0 Or ph <= 0 Then Exit Sub
+        If m_outW <= 0 Or m_outH <= 0 Then Exit Sub
+    
+        sc = CDbl(pw) / CDbl(m_outW)
+        If CDbl(ph) / CDbl(m_outH) < sc Then sc = CDbl(ph) / CDbl(m_outH)
+    
+        dw = CLng(CDbl(m_outW) * sc)
+        dh = CLng(CDbl(m_outH) * sc)
+        If dw < 1 Then dw = 1
+        If dh < 1 Then dh = 1
+    
+        Dim hdcMem As LongPtr, oldObj As LongPtr
+        hdcMem = CreateCompatibleDC(picPreview.hDC)
+        If hdcMem = 0 Then Exit Sub
+        oldObj = SelectObject(hdcMem, m_hBmp)
+        picPreview.Cls
+        PaintPreviewBg                       ' 先铺背景图（缩放成 picPreview 一样大）
+        
+        Dim ok As Long
+        ok = 0
+        If USE_ALPHA_BLEND Then
+            ' 透明合成：消息图镂空的地方能看到底下的背景图
+            ok = AlphaBlend(picPreview.hDC, (pw - dw) \ 2, (ph - dh) \ 2, dw, dh, _
+                            hdcMem, 0, 0, m_outW, m_outH, AC_BLENDFUNC)
+        End If
+        If ok = 0 Then
+            ' AlphaBlend 没成功（或关掉了透明合成），退回原来的不透明贴图
+            SetStretchBltMode picPreview.hDC, STRETCH_DELETESCANS
+            StretchBlt picPreview.hDC, (pw - dw) \ 2, (ph - dh) \ 2, dw, dh, _
+                       hdcMem, 0, 0, m_outW, m_outH, SRCCOPY
+        End If
+        SelectObject hdcMem, oldObj
+        DeleteDC hdcMem
+        picPreview.Refresh
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 把一张图拉伸铺满目标图片框（不保持宽高比，跟控件缩放一致）
+    ' 先试高质量插值；这个 tB 版本不认 StretchQuality 参数就自动退回普通贴图，
+    ' 所以不管常量/参数在不在都能正常跑
+    ' ------------------------------------------------------------------
+    Private Sub StretchFill(ByVal Target As PictureBox, ByVal pic As StdPicture)
+        If pic Is Nothing Then Exit Sub
+        If Target Is Nothing Then Exit Sub
+        If Target.ScaleWidth <= 0 Or Target.ScaleHeight <= 0 Then Exit Sub
+        
+        On Error Resume Next
+        ' 目标宽高 = 控件的 ScaleWidth / ScaleHeight => 拉伸填满
+        Target.PaintPicture pic, 0, 0, Target.ScaleWidth, Target.ScaleHeight, _
+                            , , , , , STRETCH_QUALITY_HIGH
+        If Err.Number <> 0 Then
+            ' 该版本不支持 StretchQuality 参数（或值非法）：退回普通 PaintPicture
+            Err.Clear
+            Target.PaintPicture pic, 0, 0, Target.ScaleWidth, Target.ScaleHeight
+            If Err.Number <> 0 Then Err.Clear
+        End If
+        On Error GoTo 0
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 把当前风格对应的背景图拉伸铺满 picPreview（不保持宽高比，跟控件缩放一致）
+    ' ------------------------------------------------------------------
+    Private Sub PaintPreviewBg()
+        Dim bg As StdPicture
+        If m_style = STYLE_HOMM3 Then
+            Set bg = m_void3
+        Else
+            Set bg = m_void2
+        End If
+        StretchFill picPreview, bg
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 只显示背景（还没渲染出消息图，或渲染失败时调用）
+    ' ------------------------------------------------------------------
+    Private Sub ShowBackgroundOnly()
+        picPreview.Cls
+        PaintPreviewBg
+        picPreview.Refresh
+    End Sub
+    
+    ' 控件大小变了，背景图跟着重铺（AutoRedraw=True 时会保留画面）
+    Private Sub picPreview_Resize()
+        If m_hBmp <> 0 Then
+            ShowPreview
+        Else
+            ShowBackgroundOnly
+        End If
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 左侧面板 picPanel 的背景图（方便以后换皮：把 homm3-panel.png / homm2-panel.png
+    ' 放进资源或 img 目录即可自动生效；没有就保持原来的灰色，不影响使用）
+    ' ------------------------------------------------------------------
+    Private Sub PaintPanelBg()
+        If m_panelBg Is Nothing Then Exit Sub
+        If picPanel.ScaleWidth <= 0 Or picPanel.ScaleHeight <= 0 Then Exit Sub
+        picPanel.AutoRedraw = True
+        picPanel.Cls
+        StretchFill picPanel, m_panelBg
+        picPanel.Refresh
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 一次性把所有图片都找一遍：① 资源 → ② 磁盘 → ③ 用户手动指定的目录
+    ' 找不到只提示 + 写日志，绝不退出程序
+    ' Quiet = True 时不弹 MsgBox，只写日志
+    ' ------------------------------------------------------------------
+    Private Sub LoadAllImages(Optional ByVal Quiet As Boolean = False)
+        Dim miss As String
+        
+        ' 精灵图：要的是“路径”（给 GDI+ 渲染内核用）
+        m_sprite3 = FindSpriteRes("homm3-sprite.png", "img")
+        m_sprite2 = FindSpriteRes("homm2-sprite.png", "img")
+        
+        ' 背景图：要的是“图片对象”（直接贴到 picPreview 上）
+        Set m_void3 = LoadPictureAuto(VOID_BG_H3, "img")
+        Set m_void2 = LoadPictureAuto(VOID_BG_H2, "img")
+        
+        ' 左侧面板的背景图（可选）
+        If m_style = STYLE_HOMM3 Then
+            Set m_panelBg = LoadPictureAuto(PANEL_BG_H3, "img")
+        Else
+            Set m_panelBg = LoadPictureAuto(PANEL_BG_H2, "img")
+        End If
+        
+        If Len(m_sprite3) = 0 Then miss = miss & "  · homm3-sprite.png（HoMM3 精灵图）" & vbCrLf
+        If Len(m_sprite2) = 0 Then miss = miss & "  · homm2-sprite.png（HoMM2 精灵图）" & vbCrLf
+        If m_void3 Is Nothing Then miss = miss & "  · " & VOID_BG_H3 & "（HoMM3 预览背景）" & vbCrLf
+        If m_void2 Is Nothing Then miss = miss & "  · " & VOID_BG_H2 & "（HoMM2 预览背景）" & vbCrLf
+        
+        If Len(miss) > 0 Then
+            LogToMain "以下图片没能加载：" & vbCrLf & miss & "可单击[打开图片.......]手动指定图片目录。", vbRed
+            If Not Quiet Then
+                MsgBox "以下图片没能找到，程序仍可继续使用：" & vbCrLf & vbCrLf & miss & vbCrLf & _
+                       "请单击 [打开图片.......] 按钮，输入图片所在目录手动加载。", vbExclamation, "HoMM"
+            End If
+        Else
+            LogToMain "图片加载完成（优先资源，其次磁盘）。", vbGreen
+        End If
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    ' 手动指定图片目录（也可以直接输某张图片的完整路径）
+    ' ------------------------------------------------------------------
+    Private Sub cmdSprite_Click()
+        Dim s As String, dirIn As String
+        
+        s = InputBox("请输入图片所在的【文件夹】，或任意一张图片的完整路径：" & vbCrLf & _
+                     "例如：D:\我的素材\img" & vbCrLf & vbCrLf & _
+                     "（留空取消）", "手动加载图片", g_UserImgDir)
+        If Len(s) = 0 Then Exit Sub
+        
+        dirIn = PickImgDir(s)
+        If Len(dirIn) = 0 Then
+            MsgBox "路径不存在：" & vbCrLf & s, vbExclamation, "HoMM"
+            Exit Sub
+        End If
+        
+        g_UserImgDir = dirIn
+        LogToMain "已指定图片目录：" & dirIn, vbCyan
+        
+        LoadAllImages False      ' 重新找一遍，这次会带上用户目录
+        PaintPanelBg             ' 面板背景可能变了
+        DoRender                 ' 立刻按新图片重画
+    End Sub
+    
+    Private Sub cmdSave_Click()
+        If m_bmp = 0 Then
+            MsgBox "图片不存在，无法保存！", vbExclamation, "HoMM"
+            Exit Sub
+        End If
+        Dim dirOut As String
+        dirOut = App.Path & "\output"
+        If Len(Dir$(dirOut, vbDirectory)) = 0 Then MkDir dirOut
+        Dim fn As String
+        fn = dirOut & "\HoMM-message-" & Format$(Now, "yyyymmdd-hhnnss") & ".png"
+        If GdiPlus_SavePng(m_bmp, fn) Then
+            MsgBox "图片已保存:" & vbCrLf & fn & vbCrLf & vbCrLf & _
+                   CStr(m_outW) & " x " & CStr(m_outH) & " px", vbInformation, "HoMM"
+        Else
+            MsgBox "保存图片文件失败:" & vbCrLf & fn, vbExclamation, "HoMM"
+        End If
+    End Sub
+    
+    ' ------------------------------------------------------------------
+    Private Sub txtText_Change()
+        DoRender
+    End Sub
+    
+    Private Sub optHomm3_Click()'H3         
+        m_style = STYLE_HOMM3
+        SyncStyleControls
+        Set m_panelBg = LoadPictureAuto(PANEL_BG_H3, "img")   ' 面板背景随风格换
+        PaintPanelBg
+        DoRender                                              ' 里面会重铺 picPreview 背景
+    End Sub
+    
+    Private Sub optHomm2_Click()'h2     
+        m_style = STYLE_HOMM2
+        SyncStyleControls
+        Set m_panelBg = LoadPictureAuto(PANEL_BG_H2, "img")
+        PaintPanelBg
+        DoRender
+    End Sub
+    
+    Private Sub optGood_Click()
+        DoRender
+    End Sub
+    
+    Private Sub optEvil_Click()
+        DoRender
+    End Sub
+    
+    Private Sub cboColor_Click()
+        DoRender
+    End Sub
+    
+    Private Sub cboZoom_Click()
+        DoRender
+    End Sub
+    
+    Private Sub chkOK_Click()
+        DoRender
+    End Sub
+    
+    Private Sub chkCancel_Click()
+        DoRender
+    End Sub
+    
+    Private Sub chkShadow_Click()
+        DoRender
+    End Sub
+    
+    Private Sub chkScroll_Click()
+        DoRender
+    End Sub
+    
+    Private Sub chkOutline_Click()
+        CJK_Reset
+        DoRender
+    End Sub
+    
+    Private Sub optAuto_Click()
+        DoRender
+    End Sub
+    
+    Private Sub optManual_Click()
+        DoRender
+    End Sub
+    
+    Private Sub txtWidth_Change()
+        If m_loading Then Exit Sub
+        If Not optManual.Value Then
+            optManual.Value = True      ' fires optManual_Click -> DoRender
+        Else
+            DoRender
+        End If
+    End Sub
+    
+    Private Sub txtHeight_Change()
+        If m_loading Then Exit Sub
+        If Not optManual.Value Then
+            optManual.Value = True
+        Else
+            DoRender
+        End If
+    End Sub
+    
+    Private Sub txtFont_Change()
+        CJK_Reset
+        DoRender
+    End Sub
+    
+    Private Sub txtFontSize_Change()
+        CJK_Reset
+        DoRender
+    End Sub
+    
+    Private Sub txtFontY_Change()
+        DoRender
+    End Sub
+    
+   '《魔法门之英雄无敌》风格的消息生成器 By 高保洪 qq127644712
+End Class
